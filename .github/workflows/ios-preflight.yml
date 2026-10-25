@@ -1,0 +1,64 @@
+name: iOS Build Preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Check iOS build prerequisites
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Report Apple build tools
+        run: |
+          set -eu
+          echo "macOS runner:"
+          sw_vers
+          echo "\nXcode:"
+          xcodebuild -version
+          echo "\nAvailable disk space:"
+          df -h /System/Volumes/Data || df -h /
+          echo "\nAvailable tools:"
+          for tool in git cmake ninja; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              printf '%s: ' "$tool"
+              "$tool" --version | head -n 1 || true
+            else
+              echo "$tool: MISSING"
+            fi
+          done
+          if command -v uv >/dev/null 2>&1; then
+            uv --version
+          else
+            echo "uv: MISSING"
+          fi
+
+      - name: Check project build scripts
+        run: |
+          set -eu
+          for file in ios/scripts/build.sh ios/scripts/provision.sh ios/scripts/sign.sh ios/scripts/env.sh; do
+            if [ -f "$file" ]; then
+              echo "OK: $file"
+            else
+              echo "MISSING: $file"
+              exit 1
+            fi
+          done
+
+      - name: Check for local game input without uploading it
+        run: |
+          set -eu
+          if [ -f "game/code/U-King.rpx" ]; then
+            echo "Found game/code/U-King.rpx"
+          else
+            echo "NOTE: game/code/U-King.rpx is not in this repository checkout."
+            echo "The workflow deliberately does not download game files or publish an IPA."
+            echo "A complete device build still needs the user's legally obtained BOTW Wii U v208 game folder and valid Apple signing/provisioning data."
+          fi
+          echo "Preflight finished. This checks the runner and project scripts; it does not build or sign an IPA."
