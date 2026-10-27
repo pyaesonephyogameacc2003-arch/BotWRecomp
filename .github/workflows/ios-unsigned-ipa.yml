@@ -1,0 +1,122 @@
+name: Build BotWRecomp iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  U_KING_SHA256: ba58da5b95ce929e005d058ceb08b9b2788d1ab2bbc8a6c189bbadca0bb34d30
+  BOTW_BUNDLE_ID: com.pyaesonephyogameacc2003.BotWRecomp
+  BOTW_IOS_JOBS: 6
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required secret
+        env:
+          BOTW_GAME_URL: ${{ secrets.BOTW_GAME_URL }}
+        run: |
+          if [ -z "$BOTW_GAME_URL" ]; then
+            echo "Missing BOTW_GAME_URL repository secret."
+            echo "Set it to a direct HTTPS download URL for your own Wii U BOTW v208 game archive."
+            exit 1
+          fi
+
+      - name: Install build tools
+        run: |
+          brew update
+          brew install cmake ninja uv boost glm
+          xcode-select -p
+          xcodebuild -version
+
+      - name: Restore generated game code cache
+        id: generated-cache
+        uses: actions/cache@v4
+        with:
+          path: generated
+          key: botw-generated-v208-${{ env.U_KING_SHA256 }}
+
+      - name: Download and unpack own BOTW v208 dump
+        if: steps.generated-cache.outputs.cache-hit != 'true'
+        env:
+          BOTW_GAME_URL: ${{ secrets.BOTW_GAME_URL }}
+        run: |
+          set -euo pipefail
+          mkdir -p _input
+          curl -fL --retry 3 --retry-all-errors --progress-bar "$BOTW_GAME_URL" -o _input/botw-game
+          file _input/botw-game
+          mkdir -p game
+          case "$(file -b _input/botw-game)" in
+            *Zip*) unzip -q _input/botw-game -d game ;;
+            *7-zip*) brew install p7zip && 7z x -y -o"game" _input/botw-game >/dev/null ;;
+            *Zstandard*|*zstd*|*tar\ archive*) tar -xf _input/botw-game -C game ;;
+            *) echo "Unsupported archive format. Use a .zip, .7z, .tar, .tar.gz or .tar.zst archive."; exit 1 ;;
+          esac
+          rm -f _input/botw-game
+
+          GAME_DIR="game"
+          if [ ! -f "$GAME_DIR/code/U-King.rpx" ]; then
+            CANDIDATE=$(find game -type f -name U-King.rpx -print -quit)
+            [ -n "$CANDIDATE" ] || { echo "U-King.rpx not found"; exit 1; }
+            GAME_DIR="$(dirname "$(dirname "$CANDIDATE")")"
+          fi
+          test -d "$GAME_DIR/code"
+          test -d "$GAME_DIR/content"
+          test -d "$GAME_DIR/meta"
+          ACTUAL=$(shasum -a 256 "$GAME_DIR/code/U-King.rpx" | awk '{print $1}')
+          echo "U-King.rpx SHA256: $ACTUAL"
+          [ "$ACTUAL" = "$U_KING_SHA256" ] || { echo "Wrong BOTW version: expected v208/1.6.0 USA executable."; exit 1; }
+
+          uv run python -I tools/recompile.py "$GAME_DIR/code/U-King.rpx" generated
+
+      - name: Restore iOS dependency cache
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: ios-deps
+          key: botw-ios-deps-iphoneos-${{ hashFiles('ios/scripts/build_deps.sh', 'ios/CMakeLists.txt') }}
+
+      - name: Build iOS dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          ios/scripts/build_deps.sh iphoneos
+
+      - name: Configure iOS app
+        run: |
+          cmake -S ios -B build-ios/iphoneos -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=18.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBOTW_BUNDLE_ID="$BOTW_BUNDLE_ID" \
+            -DBOTW_IOS_DEPS="$PWD/ios-deps"
+
+      - name: Compile unsigned iOS app
+        run: |
+          nice -n 10 cmake --build build-ios/iphoneos -j "$BOTW_IOS_JOBS"
+          test -d build-ios/iphoneos/BotWRecomp.app
+
+      - name: Package unsigned IPA
+        run: |
+          rm -rf Payload BotWRecomp-unsigned.ipa
+          mkdir Payload
+          cp -R build-ios/iphoneos/BotWRecomp.app Payload/BotWRecomp.app
+          /usr/bin/zip -qry BotWRecomp-unsigned.ipa Payload
+          ls -lh BotWRecomp-unsigned.ipa
+
+      - name: Publish private build release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="botw-ios-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" BotWRecomp-unsigned.ipa \
+            --title "BotWRecomp iOS build ${GITHUB_RUN_NUMBER}" \
+            --notes "Unsigned IPA built from the repository source and the user's own Wii U v208 dump. Install/sign the IPA yourself. Game files are not included in the IPA." \
+            --target "$GITHUB_SHA"
