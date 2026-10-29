@@ -122,7 +122,7 @@ jobs:
         run: |
           ios/scripts/build_deps.sh iphoneos
 
-      - name: Configure iOS app
+      - name: Configure iOS app (automatic BC support detection)
         run: |
           cmake -S ios -B build-ios/iphoneos -G Ninja \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -131,8 +131,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=18.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DBOTW_BUNDLE_ID="$BOTW_BUNDLE_ID" \
-            -DBOTW_IOS_DEPS="$PWD/ios-deps" \
-            -DBOTW_FORCE_NO_BC=ON
+            -DBOTW_IOS_DEPS="$PWD/ios-deps"
 
       - name: Compile unsigned iOS app
         run: |
@@ -150,7 +149,7 @@ jobs:
       - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BotWRecomp-iPhone15-NoBC-unsigned
+          name: BotWRecomp-iPhone15-Auto-BC-unsigned
           path: BotWRecomp-unsigned.ipa
           if-no-files-found: error
           retention-days: 7
