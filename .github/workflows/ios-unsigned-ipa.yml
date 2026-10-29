@@ -18,13 +18,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify required secret
+      - name: Verify required secrets
         env:
           BOTW_GAME_URL: ${{ secrets.BOTW_GAME_URL }}
+          BOTW_UPDATE_URL: ${{ secrets.BOTW_UPDATE_URL }}
         run: |
+          set -euo pipefail
           if [ -z "$BOTW_GAME_URL" ]; then
             echo "Missing BOTW_GAME_URL repository secret."
-            echo "Set it to a direct HTTPS download URL for your own Wii U BOTW v208 game archive."
+            echo "Set it to a direct HTTPS URL for your own Wii U BOTW base-game ZIP/archive."
+            exit 1
+          fi
+          if [ -z "$BOTW_UPDATE_URL" ]; then
+            echo "Missing BOTW_UPDATE_URL repository secret."
+            echo "Set it to a direct HTTPS URL for your own Wii U BOTW v208 update ZIP/archive."
             exit 1
           fi
 
@@ -42,40 +49,62 @@ jobs:
           path: generated
           key: botw-generated-v208-${{ env.U_KING_SHA256 }}
 
-      - name: Download and unpack own BOTW v208 dump
+      - name: Download, extract, and merge own BOTW game + update
         if: steps.generated-cache.outputs.cache-hit != 'true'
         env:
           BOTW_GAME_URL: ${{ secrets.BOTW_GAME_URL }}
+          BOTW_UPDATE_URL: ${{ secrets.BOTW_UPDATE_URL }}
         run: |
           set -euo pipefail
-          mkdir -p _input
-          curl -fL --retry 3 --retry-all-errors --progress-bar "$BOTW_GAME_URL" -o _input/botw-game
-          file _input/botw-game
-          mkdir -p game
-          case "$(file -b _input/botw-game)" in
-            *Zip*) unzip -q _input/botw-game -d game ;;
-            *7-zip*) brew install p7zip && 7z x -y -o"game" _input/botw-game >/dev/null ;;
-            *gzip\ compressed\ data*) tar -xzf _input/botw-game -C game ;;
-            *Zstandard*) brew install zstd && zstd -dc _input/botw-game | tar -xf - -C game ;;
-            *tar\ archive*) tar -xf _input/botw-game -C game ;;
-            *) echo "Unsupported archive format. Use .zip, .7z, .tar, .tar.gz or .tar.zst."; exit 1 ;;
-          esac
-          rm -f _input/botw-game
+          mkdir -p _input game-base game-update game
 
-          GAME_DIR="game"
-          if [ ! -f "$GAME_DIR/code/U-King.rpx" ]; then
-            CANDIDATE=$(find game -type f -name U-King.rpx -print -quit)
-            [ -n "$CANDIDATE" ] || { echo "U-King.rpx not found"; exit 1; }
-            GAME_DIR="$(dirname "$(dirname "$CANDIDATE")")"
-          fi
-          test -d "$GAME_DIR/code"
-          test -d "$GAME_DIR/content"
-          test -d "$GAME_DIR/meta"
-          ACTUAL=$(shasum -a 256 "$GAME_DIR/code/U-King.rpx" | awk '{print $1}')
-          echo "U-King.rpx SHA256: $ACTUAL"
-          [ "$ACTUAL" = "$U_KING_SHA256" ] || { echo "Wrong BOTW version: expected v208/1.6.0 USA executable."; exit 1; }
+          extract_archive() {
+            archive="$1"
+            destination="$2"
+            description="$(file -b "$archive")"
+            echo "Extracting $archive ($description)"
+            case "$description" in
+              *Zip*) unzip -q "$archive" -d "$destination" ;;
+              *7-zip*) brew install p7zip && 7z x -y -o"$destination" "$archive" >/dev/null ;;
+              *gzip\ compressed\ data*) tar -xzf "$archive" -C "$destination" ;;
+              *Zstandard*) brew install zstd && zstd -dc "$archive" | tar -xf - -C "$destination" ;;
+              *tar\ archive*) tar -xf "$archive" -C "$destination" ;;
+              *) echo "Unsupported archive: $description"; exit 1 ;;
+            esac
+          }
 
-          uv run python -I tools/recompile.py "$GAME_DIR/code/U-King.rpx" generated
+          curl -fL --retry 3 --retry-all-errors --progress-bar "$BOTW_GAME_URL" -o _input/botw-base
+          curl -fL --retry 3 --retry-all-errors --progress-bar "$BOTW_UPDATE_URL" -o _input/botw-update
+          extract_archive _input/botw-base game-base
+          extract_archive _input/botw-update game-update
+          rm -f _input/botw-base _input/botw-update
+
+          BASE_RPX="$(find game-base -type f -path '*/code/U-King.rpx' -print -quit)"
+          UPDATE_RPX="$(find game-update -type f -path '*/code/U-King.rpx' -print -quit)"
+          [ -n "$BASE_RPX" ] || { echo "Base game ZIP: code/U-King.rpx not found"; exit 1; }
+          [ -n "$UPDATE_RPX" ] || { echo "Update ZIP: code/U-King.rpx not found. Check that this is the Wii U BOTW v208 update dump."; exit 1; }
+
+          BASE_DIR="$(dirname "$(dirname "$BASE_RPX")")"
+          UPDATE_DIR="$(dirname "$(dirname "$UPDATE_RPX")")"
+          for folder in code content meta; do
+            [ -d "$BASE_DIR/$folder" ] || { echo "Base game missing $folder/"; exit 1; }
+            [ -d "$UPDATE_DIR/$folder" ] || { echo "Update archive missing $folder/"; exit 1; }
+            mkdir -p "game/$folder"
+            rsync -a "$BASE_DIR/$folder/" "game/$folder/"
+            # Overlay the update onto the base game, replacing matching files.
+            rsync -a "$UPDATE_DIR/$folder/" "game/$folder/"
+          done
+
+          test -f game/code/U-King.rpx
+          ACTUAL="$(shasum -a 256 game/code/U-King.rpx | awk '{print $1}')"
+          echo "Merged U-King.rpx SHA256: $ACTUAL"
+          [ "$ACTUAL" = "$U_KING_SHA256" ] || {
+            echo "Merged game is not the expected USA v208 / update 1.6.0 executable."
+            echo "Check that the base game and update are both from the same region and that the update is v208."
+            exit 1
+          }
+
+          uv run python -I tools/recompile.py game/code/U-King.rpx generated
 
       - name: Restore iOS dependency cache
         id: deps-cache
