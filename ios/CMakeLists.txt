@@ -28,6 +28,7 @@ else()
 endif()
 set(BOTW_BUNDLE_ID "com.example.BotWRecomp" CACHE STRING "CFBundleIdentifier (build.sh passes BOTW_BUNDLE_ID)")
 set(BOTW_IOS_DEPS "${ROOT}/ios-deps" CACHE PATH "ios/scripts/build_deps.sh output")
+option(BOTW_FORCE_NO_BC "Force CPU decoding of BC1-BC5 textures for devices/builds that need the No-BC path" OFF)
 set(DEPS ${BOTW_IOS_DEPS}/prefix-${BOTW_SDK})
 
 # deps live outside the SDK sysroot, which the iOS platform module restricts find_package to
@@ -76,6 +77,7 @@ target_include_directories(cemu_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/compat
   /opt/homebrew/opt/boost/include /opt/homebrew/opt/glm/include)
 target_link_libraries(cemu_gpu PRIVATE fmt::fmt zstd::libzstd_static)
 target_compile_definitions(cemu_gpu PRIVATE BOOST_NOWIDE_NO_LIB ENABLE_METAL BOTWRECOMP IMGUI_IMPL_METAL_CPP
+  BOTW_FORCE_NO_BC=$<BOOL:${BOTW_FORCE_NO_BC}>
   EMULATOR_VERSION_MAJOR=2 EMULATOR_VERSION_MINOR=6 EMULATOR_VERSION_PATCH=0 EMULATOR_HASH=a53cf0e)
 target_compile_options(cemu_gpu PRIVATE -w -O2 -g1
   "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/compat/botw_ios_platform.h" "SHELL:-include Common/precompiled.h")
