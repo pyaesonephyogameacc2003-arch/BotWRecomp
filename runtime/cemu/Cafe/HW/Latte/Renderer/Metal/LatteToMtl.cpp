@@ -3,6 +3,10 @@
 #include "HW/Latte/Core/LatteTextureLoader.h"
 #include "HW/Latte/Renderer/Metal/MetalCommon.h"
 
+#ifndef BOTW_FORCE_NO_BC
+#define BOTW_FORCE_NO_BC 0
+#endif
+
 std::map<Latte::E_GX2SURFFMT, MetalPixelFormatInfo> MTL_COLOR_FORMAT_TABLE = {
     {Latte::E_GX2SURFFMT::INVALID_FORMAT, {MTL::PixelFormatInvalid, MetalDataType::NONE, 0}},
 
@@ -185,7 +189,7 @@ void CheckForPixelFormatSupport(const MetalPixelFormatSupport& support)
     }
 
 #if TARGET_OS_IOS  // iOS port (ios/): no BC support -> decode on the CPU (Cemu's GL fallback decoders, float output)
-    if (!support.m_supportsBCTextureCompression)
+    if (!support.m_supportsBCTextureCompression || BOTW_FORCE_NO_BC)
     {
         auto bcFallback = [](Latte::E_GX2SURFFMT f, MTL::PixelFormat pf, size_t bytesPerTexel, TextureDecoder* decoder) {
             auto& e = MTL_COLOR_FORMAT_TABLE[f];
