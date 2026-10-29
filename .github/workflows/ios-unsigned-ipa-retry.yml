@@ -1,0 +1,152 @@
+name: Build BotWRecomp iOS IPA (No-BC Retry)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  U_KING_SHA256: ba58da5b95ce929e005d058ceb08b9b2788d1ab2bbc8a6c189bbadca0bb34d30
+  BOTW_BUNDLE_ID: com.pyaesonephyogameacc2003.BotWRecomp
+  BOTW_IOS_JOBS: 4
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required secrets
+        env:
+          BOTW_GAME_URL: ${{ secrets.BOTW_GAME_URL }}
+          BOTW_UPDATE_URL: ${{ secrets.BOTW_UPDATE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BOTW_GAME_URL" ]; then
+            echo "Missing BOTW_GAME_URL repository secret."
+            echo "Set it to a direct HTTPS URL for your own Wii U BOTW base-game ZIP/archive."
+            exit 1
+          fi
+          if [ -z "$BOTW_UPDATE_URL" ]; then
+            echo "Missing BOTW_UPDATE_URL repository secret."
+            echo "Set it to a direct HTTPS URL for your own Wii U BOTW v208 update ZIP/archive."
+            exit 1
+          fi
+
+      - name: Install build tools
+        run: |
+          brew update
+          brew install cmake ninja uv boost glm
+          xcode-select -p
+          xcodebuild -version
+
+      - name: Restore generated game code cache
+        id: generated-cache
+        uses: actions/cache@v4
+        with:
+          path: generated
+          key: botw-generated-v208-${{ env.U_KING_SHA256 }}
+
+      - name: Download, extract, and merge own BOTW game + update
+        if: steps.generated-cache.outputs.cache-hit != 'true'
+        env:
+          BOTW_GAME_URL: ${{ secrets.BOTW_GAME_URL }}
+          BOTW_UPDATE_URL: ${{ secrets.BOTW_UPDATE_URL }}
+        run: |
+          set -euo pipefail
+          mkdir -p _input game-base game-update game
+
+          extract_archive() {
+            archive="$1"
+            destination="$2"
+            description="$(file -b "$archive")"
+            echo "Extracting $archive ($description)"
+            case "$description" in
+              *Zip*) unzip -q "$archive" -d "$destination" ;;
+              *7-zip*) brew install p7zip && 7z x -y -o"$destination" "$archive" >/dev/null ;;
+              *gzip\ compressed\ data*) tar -xzf "$archive" -C "$destination" ;;
+              *Zstandard*) brew install zstd && zstd -dc "$archive" | tar -xf - -C "$destination" ;;
+              *tar\ archive*) tar -xf "$archive" -C "$destination" ;;
+              *) echo "Unsupported archive: $description"; exit 1 ;;
+            esac
+          }
+
+          curl -fL --retry 3 --retry-all-errors --progress-bar "$BOTW_GAME_URL" -o _input/botw-base
+          curl -fL --retry 3 --retry-all-errors --progress-bar "$BOTW_UPDATE_URL" -o _input/botw-update
+          extract_archive _input/botw-base game-base
+          extract_archive _input/botw-update game-update
+          rm -f _input/botw-base _input/botw-update
+
+          BASE_RPX="$(find game-base -type f -path '*/code/U-King.rpx' -print -quit)"
+          UPDATE_RPX="$(find game-update -type f -path '*/code/U-King.rpx' -print -quit)"
+          [ -n "$BASE_RPX" ] || { echo "Base game ZIP: code/U-King.rpx not found"; exit 1; }
+          [ -n "$UPDATE_RPX" ] || { echo "Update ZIP: code/U-King.rpx not found. Check that this is the Wii U BOTW v208 update dump."; exit 1; }
+
+          BASE_DIR="$(dirname "$(dirname "$BASE_RPX")")"
+          UPDATE_DIR="$(dirname "$(dirname "$UPDATE_RPX")")"
+          for folder in code content meta; do
+            [ -d "$BASE_DIR/$folder" ] || { echo "Base game missing $folder/"; exit 1; }
+            [ -d "$UPDATE_DIR/$folder" ] || { echo "Update archive missing $folder/"; exit 1; }
+            mkdir -p "game/$folder"
+            rsync -a "$BASE_DIR/$folder/" "game/$folder/"
+            # Overlay the update onto the base game, replacing matching files.
+            rsync -a "$UPDATE_DIR/$folder/" "game/$folder/"
+          done
+
+          test -f game/code/U-King.rpx
+          ACTUAL="$(shasum -a 256 game/code/U-King.rpx | awk '{print $1}')"
+          echo "Merged U-King.rpx SHA256: $ACTUAL"
+          [ "$ACTUAL" = "$U_KING_SHA256" ] || {
+            echo "Merged game is not the expected USA v208 / update 1.6.0 executable."
+            echo "Check that the base game and update are both from the same region and that the update is v208."
+            exit 1
+          }
+
+          uv run python -I tools/recompile.py game/code/U-King.rpx generated
+
+      - name: Restore iOS dependency cache
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: ios-deps
+          key: botw-ios-deps-iphoneos-${{ hashFiles('ios/scripts/build_deps.sh', 'ios/CMakeLists.txt') }}
+
+      - name: Build iOS dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          ios/scripts/build_deps.sh iphoneos
+
+      - name: Configure iOS app
+        run: |
+          cmake -S ios -B build-ios/iphoneos -G Ninja \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=18.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBOTW_BUNDLE_ID="$BOTW_BUNDLE_ID" \
+            -DBOTW_IOS_DEPS="$PWD/ios-deps" \
+            -DBOTW_FORCE_NO_BC=ON
+
+      - name: Compile unsigned iOS app
+        run: |
+          nice -n 10 cmake --build build-ios/iphoneos -j "$BOTW_IOS_JOBS"
+          test -d build-ios/iphoneos/BotWRecomp.app
+
+      - name: Package unsigned IPA
+        run: |
+          rm -rf Payload BotWRecomp-unsigned.ipa
+          mkdir Payload
+          cp -R build-ios/iphoneos/BotWRecomp.app Payload/BotWRecomp.app
+          /usr/bin/zip -qry BotWRecomp-unsigned.ipa Payload
+          ls -lh BotWRecomp-unsigned.ipa
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BotWRecomp-iPhone15-NoBC-unsigned
+          path: BotWRecomp-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
