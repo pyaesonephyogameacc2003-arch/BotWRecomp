@@ -37,8 +37,12 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew update
-          brew install cmake ninja uv boost glm
+          set -euo pipefail
+          # Avoid Homebrew building uv's newest Python dependency from source on macOS 14.
+          brew install cmake ninja boost glm
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv --version
           xcode-select -p
           xcodebuild -version
 
