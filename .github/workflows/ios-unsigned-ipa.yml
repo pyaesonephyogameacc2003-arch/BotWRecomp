@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   U_KING_SHA256: ba58da5b95ce929e005d058ceb08b9b2788d1ab2bbc8a6c189bbadca0bb34d30
   BOTW_BUNDLE_ID: com.pyaesonephyogameacc2003.BotWRecomp
-  BOTW_IOS_JOBS: 6
+  BOTW_IOS_JOBS: 4
 
 jobs:
   build:
@@ -55,8 +55,10 @@ jobs:
           case "$(file -b _input/botw-game)" in
             *Zip*) unzip -q _input/botw-game -d game ;;
             *7-zip*) brew install p7zip && 7z x -y -o"game" _input/botw-game >/dev/null ;;
-            *Zstandard*|*zstd*|*tar\ archive*) tar -xf _input/botw-game -C game ;;
-            *) echo "Unsupported archive format. Use a .zip, .7z, .tar, .tar.gz or .tar.zst archive."; exit 1 ;;
+            *gzip\ compressed\ data*) tar -xzf _input/botw-game -C game ;;
+            *Zstandard*) brew install zstd && zstd -dc _input/botw-game | tar -xf - -C game ;;
+            *tar\ archive*) tar -xf _input/botw-game -C game ;;
+            *) echo "Unsupported archive format. Use .zip, .7z, .tar, .tar.gz or .tar.zst."; exit 1 ;;
           esac
           rm -f _input/botw-game
 
@@ -96,7 +98,8 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=18.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DBOTW_BUNDLE_ID="$BOTW_BUNDLE_ID" \
-            -DBOTW_IOS_DEPS="$PWD/ios-deps"
+            -DBOTW_IOS_DEPS="$PWD/ios-deps" \
+            -DBOTW_FORCE_NO_BC=ON
 
       - name: Compile unsigned iOS app
         run: |
@@ -111,12 +114,10 @@ jobs:
           /usr/bin/zip -qry BotWRecomp-unsigned.ipa Payload
           ls -lh BotWRecomp-unsigned.ipa
 
-      - name: Publish private build release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="botw-ios-${GITHUB_RUN_NUMBER}"
-          gh release create "$TAG" BotWRecomp-unsigned.ipa \
-            --title "BotWRecomp iOS build ${GITHUB_RUN_NUMBER}" \
-            --notes "Unsigned IPA built from the repository source and the user's own Wii U v208 dump. Install/sign the IPA yourself. Game files are not included in the IPA." \
-            --target "$GITHUB_SHA"
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BotWRecomp-iPhone15-NoBC-unsigned
+          path: BotWRecomp-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
